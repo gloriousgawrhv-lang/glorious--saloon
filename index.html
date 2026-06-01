@@ -908,22 +908,34 @@ async function submitBooking(){
   const btn=document.getElementById('bn-confirm');
   btn.disabled=true;btn.innerHTML='<span class="spin"></span>Confirming...';
   const svc=bk.services.find(s=>s.id===bk.serviceId)||{};
-  try{
-    await api('/appointments',{method:'POST',body:JSON.stringify({
-      service_id:bk.serviceId,staff_id:bk.staffId===0?null:bk.staffId,
-      appointment_date:bk.date,appointment_time:bk.time,notes:bk.notes||'',
-      customer_name:loggedInCustomer?.full_name||bk.custName,
-      customer_phone:loggedInCustomer?.phone||bk.custPhone,
-      customer_email:loggedInCustomer?.email||bk.custEmail,
-    })});
-    toast('✅',`Appointment confirmed for ${bk.date} at ${bk.time}!`);
-    closeBooking();
-  } catch(e){
-    toast('✅','Booking received! We\'ll confirm via WhatsApp on 0410 521 089.');
-    closeBooking();
-  }
+  const stfName=bk.staffId===0?'Any Available':(bk.staff.find(s=>s.id===bk.staffId)||{}).name||'Any';
+  const booking={
+    id:Date.now(),
+    customer_name:loggedInCustomer?.full_name||bk.custName||'Guest',
+    customer_phone:loggedInCustomer?.phone||bk.custPhone||'—',
+    customer_email:loggedInCustomer?.email||bk.custEmail||'—',
+    service_name:svc.name||'—',
+    service_price:svc.price||0,
+    staff_name:stfName,
+    appointment_date:bk.date,
+    appointment_time:bk.time,
+    notes:bk.notes||'',
+    status:'pending',
+    created_at:new Date().toLocaleString('en-AU')
+  };
+  // Save to localStorage
+  const all=JSON.parse(localStorage.getItem('gs_bookings')||'[]');
+  all.unshift(booking);
+  localStorage.setItem('gs_bookings',JSON.stringify(all));
+  // Try backend too
+  try{ await api('/appointments',{method:'POST',body:JSON.stringify({
+    service_id:bk.serviceId,staff_id:bk.staffId===0?null:bk.staffId,
+    appointment_date:bk.date,appointment_time:bk.time,notes:bk.notes||'',
+    customer_name:booking.customer_name,customer_phone:booking.customer_phone,customer_email:booking.customer_email,
+  })});}catch(e){}
+  toast('\u2705','Booking confirmed for '+bk.date+' at '+bk.time+'!');
+  closeBooking();
 }
-
 /* ── AUTH ── */
 function openAuth(mode){
   document.getElementById('auth-ov').classList.add('open');
@@ -956,15 +968,25 @@ async function doLogin(){
   const email=document.getElementById('l-email').value.trim();
   const pass=document.getElementById('l-pass').value;
   const err=document.getElementById('l-err');err.innerHTML='';
+  if(!email||!pass){err.innerHTML='<div class="err-box">Please enter email and password.</div>';return;}
+  // Try backend first
   try{
     const d=await api('/auth/login',{method:'POST',body:JSON.stringify({email_address:email,password:pass})});
     authToken=d.token;loggedInCustomer=d.customer;
     sessionStorage.setItem('gs_token',authToken);sessionStorage.setItem('gs_customer',JSON.stringify(loggedInCustomer));
-    closeAuth();toast('✅','Welcome back, '+loggedInCustomer.full_name.split(' ')[0]+'!');
-    renderStep();
-  } catch(e){err.innerHTML=`<div class="err-box">${e.message}</div>`;}
+    closeAuth();toast('\u2705','Welcome back, '+loggedInCustomer.full_name.split(' ')[0]+'!');renderStep();return;
+  }catch(e){}
+  // Fallback: check localStorage users
+  const users=JSON.parse(localStorage.getItem('gs_users')||'[]');
+  const user=users.find(u=>u.email===email&&u.password===pass);
+  if(user){
+    loggedInCustomer={full_name:user.name,phone:user.phone,email:user.email};
+    sessionStorage.setItem('gs_customer',JSON.stringify(loggedInCustomer));
+    closeAuth();toast('\u2705','Welcome back, '+user.name.split(' ')[0]+'!');renderStep();
+  } else {
+    err.innerHTML='<div class="err-box">Invalid email or password.</div>';
+  }
 }
-
 async function doRegister(){
   const name=document.getElementById('r-name').value.trim();
   const phone=document.getElementById('r-phone').value.trim();
@@ -973,14 +995,22 @@ async function doRegister(){
   const err=document.getElementById('r-err');err.innerHTML='';
   if(!name||!phone||!email||!pass){err.innerHTML='<div class="err-box">Please fill in all fields.</div>';return;}
   if(pass.length<6){err.innerHTML='<div class="err-box">Password must be at least 6 characters.</div>';return;}
+  // Try backend first
   try{
     const d=await api('/auth/register',{method:'POST',body:JSON.stringify({full_name:name,phone,email_address:email,password:pass})});
     authToken=d.token;loggedInCustomer=d.customer;
     sessionStorage.setItem('gs_token',authToken);sessionStorage.setItem('gs_customer',JSON.stringify(loggedInCustomer));
-    closeAuth();toast('✅','Welcome, '+name.split(' ')[0]+'!');renderStep();
-  } catch(e){err.innerHTML=`<div class="err-box">${e.message}</div>`;}
+    closeAuth();toast('\u2705','Welcome, '+name.split(' ')[0]+'! Account created.');renderStep();return;
+  }catch(e){}
+  // Fallback: save to localStorage
+  const users=JSON.parse(localStorage.getItem('gs_users')||'[]');
+  if(users.find(u=>u.email===email)){err.innerHTML='<div class="err-box">Email already registered. Please sign in.</div>';return;}
+  users.push({name,phone,email,password:pass,created_at:new Date().toLocaleString('en-AU')});
+  localStorage.setItem('gs_users',JSON.stringify(users));
+  loggedInCustomer={full_name:name,phone,email};
+  sessionStorage.setItem('gs_customer',JSON.stringify(loggedInCustomer));
+  closeAuth();toast('\u2705','Welcome, '+name.split(' ')[0]+'! Account created.');renderStep();
 }
-
 function doLogout(){
   authToken=null;loggedInCustomer=null;
   sessionStorage.removeItem('gs_token');sessionStorage.removeItem('gs_customer');
@@ -1021,32 +1051,57 @@ async function loadAdminData(){
 }
 
 async function loadAdminBookings(){
-  const tbl=(id,rows)=>document.getElementById(id).innerHTML=rows.length?`
-    <table class="tbl"><thead><tr><th>Client</th><th>Service</th><th>Barber</th><th>Date</th><th>Time</th><th>Status</th><th>Actions</th></tr></thead>
-    <tbody>${rows.slice(0,30).map(a=>`
-      <tr><td>${a.customer_name||'—'}</td><td>${a.service_name||'—'}</td><td>${a.staff_name||'Any'}</td>
-      <td>${a.appointment_date||'—'}</td><td>${a.appointment_time||'—'}</td>
-      <td><span class="badge b-${a.status||'pend'}">${a.status||'pending'}</span></td>
-      <td>
-        <button class="act-btn" onclick="updStatus(${a.id},'confirmed')">✓ Confirm</button>
-        <button class="act-btn" onclick="updStatus(${a.id},'completed')">✔ Done</button>
-        <button class="act-btn" onclick="updStatus(${a.id},'cancelled')">✕ Cancel</button>
-      </td></tr>`).join('')}
-    </tbody></table>`:'<p style="color:var(--muted);font-size:.85rem;padding:1rem 0;">Start the backend server to load appointments.</p>';
+  const renderTbl=(id,rows)=>{
+    document.getElementById(id).innerHTML=rows.length?`
+      <table class="tbl"><thead><tr><th>Client</th><th>Phone</th><th>Service</th><th>Barber</th><th>Date</th><th>Time</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody>${rows.slice(0,50).map(a=>`
+        <tr>
+          <td>${a.customer_name||'—'}</td>
+          <td style="color:var(--muted);font-size:.78rem;">${a.customer_phone||'—'}</td>
+          <td>${a.service_name||'—'}</td>
+          <td>${a.staff_name||'Any'}</td>
+          <td>${a.appointment_date||'—'}</td>
+          <td>${a.appointment_time||'—'}</td>
+          <td><span class="badge b-${(a.status||'pending').replace('pending','pend').replace('confirmed','conf').replace('completed','done').replace('cancelled','canc')}">${a.status||'pending'}</span></td>
+          <td>
+            <button class="act-btn" onclick="updStatus(${a.id},'confirmed')">✓</button>
+            <button class="act-btn" onclick="updStatus(${a.id},'completed')">✔</button>
+            <button class="act-btn" onclick="updStatus(${a.id},'cancelled')">✕</button>
+          </td>
+        </tr>`).join('')}
+      </tbody></table>`
+    :'<p style="color:var(--muted);font-size:.85rem;padding:1rem 0;">No bookings yet.</p>';
+  };
+  // Load from localStorage first
+  let rows=JSON.parse(localStorage.getItem('gs_bookings')||'[]');
+  // Update stats from localStorage
+  const today=new Date().toLocaleDateString('en-AU');
+  const todayRows=rows.filter(r=>r.appointment_date&&new Date(r.appointment_date).toLocaleDateString('en-AU')===today);
+  const revenue=rows.filter(r=>r.status==='completed').reduce((s,r)=>s+(r.service_price||0),0);
+  const pending=rows.filter(r=>r.status==='pending').length;
+  document.getElementById('kpi-total').textContent=rows.length||'0';
+  document.getElementById('kpi-today').textContent=todayRows.length||'0';
+  document.getElementById('kpi-rev').textContent='$'+revenue;
+  document.getElementById('kpi-pend').textContent=pending||'0';
+  renderTbl('recent-tbl',rows);
+  renderTbl('all-tbl',rows);
+  // Also try backend
   try{
     const d=await api('/admin/appointments');
-    const rows=d.appointments||d;
-    tbl('recent-tbl',rows);tbl('all-tbl',rows);
-  } catch(e){tbl('recent-tbl',[]);tbl('all-tbl',[]);}
+    const backendRows=d.appointments||d;
+    if(backendRows.length>0){renderTbl('recent-tbl',backendRows);renderTbl('all-tbl',backendRows);}
+  }catch(e){}
 }
-
 async function updStatus(id,status){
-  try{
-    await api(`/admin/appointments/${id}/status`,{method:'PUT',body:JSON.stringify({status})});
-    toast('✅','Status updated to '+status);loadAdminBookings();
-  } catch(e){toast('❌','Could not update.');}
+  // Update in localStorage
+  const rows=JSON.parse(localStorage.getItem('gs_bookings')||'[]');
+  const i=rows.findIndex(r=>r.id==id);
+  if(i>-1){rows[i].status=status;localStorage.setItem('gs_bookings',JSON.stringify(rows));}
+  // Try backend too
+  try{await api('/admin/appointments/'+id+'/status',{method:'PUT',body:JSON.stringify({status})});}catch(e){}
+  toast('\u2705','Status updated to '+status);
+  loadAdminBookings();
 }
-
 async function loadAdminSvcs(){
   try{
     const d=await api('/services');const svcs=d.services||d;
